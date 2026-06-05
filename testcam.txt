@@ -1,0 +1,5 @@
+wmic path Win32_PnPEntity where "PNPClass='Camera' or Caption like '%camera%'" get Caption, DeviceID
+
+wmic path Win32_PnPEntity where "PNPClass='Camera'" get Caption, Location, DeviceID
+
+pnputil /enum-devices /class Camera

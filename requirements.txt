@@ -1,0 +1,5 @@
+opencv-python>=4.8.0
+numpy>=1.24.0
+Pillow>=10.0.0
+cv2-enumerate-cameras>=1.1.15
+pyinstaller>=6.0.0
