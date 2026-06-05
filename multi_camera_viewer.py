@@ -44,6 +44,21 @@ import numpy as np
 from datetime import datetime
 from PIL import Image, ImageDraw, ImageFont
 
+# ============================================================
+# CẤU HÌNH - chỉnh ở đây
+# ============================================================
+
+# --- ĐỊNH DANH CAMERA THEO INSTANCE_ID (ổn định theo cổng USB vật lý) ---
+# Mỗi CAM khớp theo device instance_id (lấy từ Device Manager -> Details ->
+# "Device instance path", hoặc chạy: python multi_camera_viewer.py discover).
+# Khớp bằng so-substring đã chuẩn hóa với 'path' của cv2_enumerate_cameras nên
+# miễn nhiễm khác biệt dấu \ vs # và chữ hoa/thường. Index DSHOW có thể đảo khi
+# có camera ảo / cắm lại, nhưng instance_id thì cố định theo cổng -> luôn đúng ô.
+#
+# Thứ tự CAM 1..6 ánh xạ ra bố cục lưới (số chẵn HÀNG TRÊN, số lẻ HÀNG DƯỚI):
+#       CAM2   CAM4   CAM6   (hàng trên)
+#       CAM1   CAM3   CAM5   (hàng dưới)
+# Dùng raw-string (r"...") vì instance_id có dấu \.
 CAMERA_INSTANCE_IDS = [
     r"USB\VID_4C4A&PID_4A55&MI_00\6&17f9c0cf&0&0000",  # CAM 1 -> dưới-trái
     r"USB\VID_4C4A&PID_4A55&MI_00\6&540102a&0&0000",   # CAM 2 -> trên-trái
@@ -86,14 +101,6 @@ GRID_ROWS = 2
 # thường bỏ qua CAP_PROP_BUFFERSIZE=1, đọc thưa sẽ dồn khung cũ gây trễ 1-3s).
 # grab() rẻ (không decode); chỉ retrieve()+render theo nhịp DISPLAY_FPS để nhẹ CPU.
 DISPLAY_FPS = 10            # nhịp decode + render mỗi cam (chỉnh cân CPU/độ mượt)
-# Nhịp ghìm vòng grab() (= tốc độ camera sinh khung). QUAN TRỌNG: grab() của
-# DSHOW thường KHÔNG block -> nếu vòng while không ghìm sẽ busy-spin chiếm trọn
-# CPU. Ghìm về ~GRAB_FPS để vừa đủ xả buffer (trễ thấp) mà không spin.
-GRAB_FPS = CAPTURE_FPS
-# Số lần grab() lỗi LIÊN TIẾP trước khi coi là mất kết nối thật. Vì grab() có thể
-# trả False tạm thời (chưa kịp khung mới do nhịp/sleep) -> không buông cap ngay,
-# tránh ngắt/mở lại oan (gây dò DSHOW dồn dập -> dễ crash trên máy yếu).
-GRAB_FAIL_LIMIT = 8
 # Cooldown thử MỞ LẠI 1 camera đang mất (giây). Mở DirectShow một camera đã rớt
 # có thể block ~1-3s; giãn ra để thread của cam đó không thử mở lại dồn dập.
 # (Mỗi cam thread riêng nên dù có block cũng KHÔNG ảnh hưởng cam khác.)
@@ -221,28 +228,26 @@ class Camera:
         self.thread = None
         # Mốc lần cuối THỬ mở (cho cooldown reconnect) - tránh mở lại dồn dập.
         self._last_open_attempt = 0.0
-        self._grab_fails = 0                    # đếm grab lỗi liên tiếp (dung sai)
         # FPS quan sát được (1 / khoảng cách giữa 2 lần decode của cam này)
         self.fps = 0.0
         self._last_decode_t = 0.0
 
     def _open(self):
-        """Thử mở camera. Trả True nếu mở được.
-
-        CHỈ enumerate (list_real_cameras) khi CHƯA biết index (lần đầu, hoặc sau
-        khi mở hỏng nghi index đã đổi). Reconnect thông thường mở lại ĐÚNG index
-        cũ, KHÔNG dò -> tránh 6 thread cùng dò DSHOW dồn dập (nguyên nhân dễ crash
-        native). Toàn bộ (dò + mở) chạy trong _OPEN_LOCK để serialize an toàn."""
+        """Thử mở camera. Trả True nếu mở được. In ra codec/độ phân giải THỰC TẾ
+        được negotiate để soi cam nào rớt về raw (YUYV) gây nghẽn băng thông."""
+        # Nếu định danh theo instance_id -> dò index DSHOW HIỆN TẠI mỗi lần mở
+        # (bền với đảo index khi cắm lại / có camera ảo). Không thấy -> chưa cắm.
+        if self.target:
+            idx = find_index_by_instance(self.target, list_real_cameras() or [])
+            if idx is None:
+                return False
+            self.src = idx
+        # src=None nghĩa là ô này không resolve được cổng -> luôn coi như chưa cắm.
+        if self.src is None:
+            return False
+        # Serialize việc mở camera để tránh xung đột USB negotiate khi nhiều
+        # cam cùng được mở trên DSHOW một lúc.
         with _OPEN_LOCK:
-            # Dò index từ instance_id chỉ khi chưa biết.
-            if self.src is None:
-                if not self.target:
-                    return False
-                idx = find_index_by_instance(self.target, list_real_cameras() or [])
-                if idx is None:
-                    return False
-                self.src = idx
-
             cap = cv2.VideoCapture(self.src, cv2.CAP_DSHOW)
             # Ép MJPG TRƯỚC khi set độ phân giải để tránh nghẽn băng thông USB.
             cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
@@ -257,13 +262,8 @@ class Camera:
                 fourcc = "".join(chr((fc >> 8 * k) & 0xFF) for k in range(4))
                 print(f"[open] {self.name} (dev {self.src}): {aw}x{ah} {fourcc}")
                 self.cap = cap
-                self._grab_fails = 0
                 return True
             cap.release()
-            # Mở hỏng với index đã biết -> index có thể đã đổi (đảo/ManyCam) ->
-            # buộc dò lại (enumerate) ở lần mở kế tiếp.
-            if self.target:
-                self.src = None
             return False
 
     def _release_cap(self):
@@ -296,81 +296,52 @@ class Camera:
         self.running = False
         if self.thread is not None:
             self.thread.join(timeout=2.0)
-        # KHÔNG release cap ở đây: thread tự release trong finally của _run. Tránh
-        # release CHÉO LUỒNG khi thread còn đang grab() -> dễ crash native. Thread
-        # treo quá 2s sẽ được HĐH dọn khi tiến trình thoát (daemon).
+        self._release_cap()
 
     def _run(self):
         """Vòng đọc riêng của cam: grab() liên tục để xả buffer (khung luôn tươi),
         chỉ retrieve()+render theo nhịp DISPLAY_FPS. Tự mở lại khi rớt (cooldown).
         1 cam mất/treo chỉ ảnh hưởng thread này, không kẹt cam khác."""
         decode_period = 1.0 / DISPLAY_FPS
-        grab_interval = 1.0 / max(1, GRAB_FPS)    # ghìm vòng grab ~ tốc độ sinh khung
         next_decode = time.time()
-        next_grab = time.time()
-        try:
-            while self.running:
-                # (a) Đảm bảo cap mở; có cooldown để không thử mở lại dồn dập.
-                if self.cap is None or not self.cap.isOpened():
-                    now = time.time()
-                    if now - self._last_open_attempt < RECONNECT_INTERVAL:
-                        self.cell = None          # ô hiện "Kiểm tra lại kết nối"
-                        time.sleep(0.1)           # tránh spin trong lúc chờ cooldown
-                        continue
-                    self._last_open_attempt = now
-                    if not self._open():
-                        self.cell = None
-                        continue
-                    print(f"[+] {self.name} (dev {self.src}) đã kết nối.")
-                    next_decode = time.time()
-                    next_grab = time.time()       # reset nhịp grab, tránh burst
-
-                # (b) grab() xả buffer. DUNG SAI: grab() có thể False tạm thời ->
-                # chỉ buông cap sau GRAB_FAIL_LIMIT lần lỗi liên tiếp (tránh ngắt oan).
-                try:
-                    grabbed = self.cap.grab()
-                except cv2.error:
-                    grabbed = False
-                if not grabbed:
-                    self._grab_fails += 1
-                    if self._grab_fails >= GRAB_FAIL_LIMIT:
-                        print(f"[!] {self.name} (dev {self.src}) mất kết nối.")
-                        self._release_cap()
-                        self.cell = None
-                        self._grab_fails = 0
-                    else:
-                        time.sleep(grab_interval)  # chờ khung kế, không spin
-                    continue
-                self._grab_fails = 0
-
-                # (c) decode + render GIÃN theo DISPLAY_FPS để tiết chế CPU.
+        while self.running:
+            # (a) Đảm bảo cap mở; có cooldown để không thử mở lại dồn dập.
+            if self.cap is None or not self.cap.isOpened():
                 now = time.time()
-                if now >= next_decode:
-                    try:
-                        ok, frame = self.cap.retrieve()
-                    except cv2.error:
-                        ok, frame = False, None
-                    if ok and frame is not None:
-                        if self._last_decode_t > 0.0:
-                            dt = now - self._last_decode_t
-                            if dt > 0:
-                                self.fps = 1.0 / dt
-                        self._last_decode_t = now
-                        self.cell = self._render_cell(frame)
-                        next_decode = now + decode_period
-                    # retrieve hỏng -> bỏ qua khung này; nếu cap chết thật, (b) sẽ
-                    # đếm grab lỗi rồi buông. Không release ngay (tránh ngắt oan).
+                if now - self._last_open_attempt < RECONNECT_INTERVAL:
+                    self.cell = None              # ô hiện "Kiểm tra lại kết nối"
+                    time.sleep(0.1)               # tránh spin trong lúc chờ cooldown
+                    continue
+                self._last_open_attempt = now
+                if not self._open():
+                    self.cell = None
+                    continue
+                print(f"[+] {self.name} (dev {self.src}) đã kết nối.")
+                next_decode = time.time()
 
-                # (d) GHÌM NHỊP vòng grab -> hết busy-spin (grab() DSHOW không block).
-                next_grab += grab_interval
-                sleep_for = next_grab - time.time()
-                if sleep_for > 0:
-                    time.sleep(sleep_for)
-                else:
-                    next_grab = time.time()       # tụt nhịp -> reset, không tích nợ
-        finally:
-            # Giải phóng cap trong CHÍNH thread của cam (an toàn, không chéo luồng).
-            self._release_cap()
+            # (b) grab() liên tục XẢ buffer (rẻ, block ~1/fps); phát hiện rớt cáp.
+            if not self.cap.grab():
+                print(f"[!] {self.name} (dev {self.src}) mất kết nối.")
+                self._release_cap()
+                self.cell = None
+                continue
+
+            # (c) decode + render GIÃN theo DISPLAY_FPS để tiết chế CPU.
+            now = time.time()
+            if now >= next_decode:
+                ok, frame = self.cap.retrieve()
+                if not ok or frame is None:
+                    print(f"[!] {self.name} (dev {self.src}) mất kết nối.")
+                    self._release_cap()
+                    self.cell = None
+                    continue
+                if self._last_decode_t > 0.0:
+                    dt = now - self._last_decode_t
+                    if dt > 0:
+                        self.fps = 1.0 / dt
+                self._last_decode_t = now
+                self.cell = self._render_cell(frame)
+                next_decode = now + decode_period
 
 
 # ============================================================
