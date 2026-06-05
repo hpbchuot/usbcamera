@@ -105,6 +105,10 @@ DISPLAY_FPS = 10            # nhịp decode + render mỗi cam (chỉnh cân CPU
 # có thể block ~1-3s; giãn ra để thread của cam đó không thử mở lại dồn dập.
 # (Mỗi cam thread riêng nên dù có block cũng KHÔNG ảnh hưởng cam khác.)
 RECONNECT_INTERVAL = 5.0
+# Watchdog "đứng hình": cam đang MỞ mà không có khung mới quá ngần này giây (vd
+# USB treo do rung khiến grab() bị block, không trả False) -> ép reset để kiểm
+# tra/khôi phục kết nối. Đặt > vài lần chu kỳ grab bình thường để không reset oan.
+FREEZE_TIMEOUT = 3.0
 
 WINDOW_NAME = "Multi-Camera Viewer (6 CAM)"
 
@@ -228,26 +232,31 @@ class Camera:
         self.thread = None
         # Mốc lần cuối THỬ mở (cho cooldown reconnect) - tránh mở lại dồn dập.
         self._last_open_attempt = 0.0
+        # Watchdog "đứng hình": mốc lần cuối grab() thành công (có khung mới).
+        self.last_frame_time = 0.0
+        self._reset_requested = False           # watchdog đặt True để ép reset
         # FPS quan sát được (1 / khoảng cách giữa 2 lần decode của cam này)
         self.fps = 0.0
         self._last_decode_t = 0.0
 
     def _open(self):
         """Thử mở camera. Trả True nếu mở được. In ra codec/độ phân giải THỰC TẾ
-        được negotiate để soi cam nào rớt về raw (YUYV) gây nghẽn băng thông."""
-        # Nếu định danh theo instance_id -> dò index DSHOW HIỆN TẠI mỗi lần mở
-        # (bền với đảo index khi cắm lại / có camera ảo). Không thấy -> chưa cắm.
-        if self.target:
-            idx = find_index_by_instance(self.target, list_real_cameras() or [])
-            if idx is None:
-                return False
-            self.src = idx
-        # src=None nghĩa là ô này không resolve được cổng -> luôn coi như chưa cắm.
-        if self.src is None:
-            return False
-        # Serialize việc mở camera để tránh xung đột USB negotiate khi nhiều
-        # cam cùng được mở trên DSHOW một lúc.
+        được negotiate để soi cam nào rớt về raw (YUYV) gây nghẽn băng thông.
+
+        TOÀN BỘ (dò index theo instance_id + mở) chạy trong _OPEN_LOCK để
+        SERIALIZE. Khi rút 1 cam làm nhiều cam reconnect cùng lúc, nếu dò
+        (enumerate) song song thì cv2_enumerate/DShow có thể trả index không nhất
+        quán -> 2 cam map nhầm cùng 1 index -> TRÙNG LUỒNG. Serialize loại bỏ điều đó."""
         with _OPEN_LOCK:
+            # Dò index DSHOW HIỆN TẠI theo instance_id (bền với đảo index/camera ảo).
+            if self.target:
+                idx = find_index_by_instance(self.target, list_real_cameras() or [])
+                if idx is None:
+                    return False
+                self.src = idx
+            # src=None -> ô này không resolve được cổng -> coi như chưa cắm.
+            if self.src is None:
+                return False
             cap = cv2.VideoCapture(self.src, cv2.CAP_DSHOW)
             # Ép MJPG TRƯỚC khi set độ phân giải để tránh nghẽn băng thông USB.
             cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
@@ -298,6 +307,17 @@ class Camera:
             self.thread.join(timeout=2.0)
         self._release_cap()
 
+    def request_reset(self):
+        """Watchdog (thread main) gọi khi cam đứng hình: đặt cờ + release cap từ
+        NGOÀI để phá grab() đang treo. Thread của cam sẽ thấy grab/loop trả về,
+        xử lý cờ ở đầu vòng rồi tự mở lại (dò lại index)."""
+        self._reset_requested = True
+        try:
+            if self.cap is not None:
+                self.cap.release()
+        except Exception:
+            pass
+
     def _run(self):
         """Vòng đọc riêng của cam: grab() liên tục để xả buffer (khung luôn tươi),
         chỉ retrieve()+render theo nhịp DISPLAY_FPS. Tự mở lại khi rớt (cooldown).
@@ -305,6 +325,15 @@ class Camera:
         decode_period = 1.0 / DISPLAY_FPS
         next_decode = time.time()
         while self.running:
+            # (watchdog) Bị ép reset do đứng hình -> đóng cap & mở lại NGAY.
+            if self._reset_requested:
+                self._reset_requested = False
+                self._release_cap()              # idempotent (cap có thể đã release)
+                self.cell = None
+                self.last_frame_time = time.time()   # debounce watchdog
+                self._last_open_attempt = 0.0        # mở lại ngay, bỏ qua cooldown
+                continue
+
             # (a) Đảm bảo cap mở; có cooldown để không thử mở lại dồn dập.
             if self.cap is None or not self.cap.isOpened():
                 now = time.time()
@@ -317,6 +346,7 @@ class Camera:
                     self.cell = None
                     continue
                 print(f"[+] {self.name} (dev {self.src}) đã kết nối.")
+                self.last_frame_time = time.time()   # mốc khởi đầu cho watchdog
                 next_decode = time.time()
 
             # (b) grab() liên tục XẢ buffer (rẻ, block ~1/fps); phát hiện rớt cáp.
@@ -325,6 +355,7 @@ class Camera:
                 self._release_cap()
                 self.cell = None
                 continue
+            self.last_frame_time = time.time()       # có khung mới -> watchdog yên tâm
 
             # (c) decode + render GIÃN theo DISPLAY_FPS để tiết chế CPU.
             now = time.time()
@@ -503,6 +534,18 @@ def main():
 
     try:
         while True:
+            # Watchdog "đứng hình": cam đang MỞ mà không có khung mới quá
+            # FREEZE_TIMEOUT (vd grab() treo do rung USB) -> ép reset để tự hồi.
+            # Cam đã rớt hẳn (cap=None) do đường grab-fail tự lo, bỏ qua ở đây.
+            now = time.time()
+            for cam in cameras:
+                if (cam.cap is not None and not cam._reset_requested
+                        and cam.last_frame_time > 0.0
+                        and now - cam.last_frame_time > FREEZE_TIMEOUT):
+                    print(f"[watchdog] {cam.name} đứng hình "
+                          f"{now - cam.last_frame_time:.1f}s -> ép reset.")
+                    cam.request_reset()
+
             build_grid_into(canvas, cameras, disconnected_cells)
             cv2.imshow(WINDOW_NAME, canvas)
 

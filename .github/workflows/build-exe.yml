@@ -34,13 +34,6 @@ jobs:
           --collect-all cv2
           multi_camera_viewer.py
 
-      - name: Build EXE (multi_camera_viewer_paired)
-        run: >
-          pyinstaller --onefile --noconsole
-          --name MultiCameraViewerPaired
-          --collect-all cv2_enumerate_cameras
-          --collect-all cv2
-          multi_camera_viewer_paired.py
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
