@@ -14,15 +14,13 @@ Phím tắt:  q/ESC thoát | f toàn màn hình | s chụp ảnh lưới (.jpg)
 import cv2
 import sys
 import time
-import threading
 import numpy as np
 from datetime import datetime
 from PIL import Image, ImageDraw, ImageFont
 
 from config import (CAMERA_INSTANCE_IDS, CAMERA_INDICES, ROTATE_180_CAMS,
                     CELL_WIDTH, CELL_HEIGHT, GRID_COLS, GRID_ROWS,
-                    FREEZE_TIMEOUT, WINDOW_NAME,
-                    CAPTURE_MODE, CAMERA_PAIRS, PAIR_DWELL)
+                    FREEZE_TIMEOUT, WINDOW_NAME)
 from camera import (Camera, list_real_cameras, find_index_by_instance,
                     draw_index_badge, detect_cameras)
 
@@ -153,45 +151,13 @@ def build_cameras():
     return cameras
 
 
-def _paired_capture_loop(cameras, stop_event):
-    """[paired] Luân phiên TỪNG CẶP (CAMERA_PAIRS): mở cặp -> chụp ảnh tươi vào ô
-    -> giữ PAIR_DWELL giây -> ĐÓNG cả cặp -> sang cặp kế. Chỉ <=2 cam mở cùng lúc
-    nên nhẹ USB (hết tràn băng thông) + nhẹ CPU. Chạy 1 thread nền; main thread chỉ
-    đọc cam.cell để ghép lưới. Ô cặp chưa tới lượt vẫn giữ ảnh chụp gần nhất."""
-    n = len(cameras)
-    pairs = [[i for i in pair if 0 <= i < n] for pair in CAMERA_PAIRS]
-    while not stop_event.is_set():
-        for members in pairs:
-            if stop_event.is_set():
-                break
-            cams = [cameras[i] for i in members]
-            for cam in cams:                  # mở (nếu cần) + chụp 1 ảnh tươi
-                cam.snapshot()
-            stop_event.wait(PAIR_DWELL)        # giữ ảnh cặp này một lúc (vẫn thoát nhanh)
-            for cam in cams:                   # ĐÓNG để nhường băng thông cho cặp kế
-                cam._release_cap()
-    for cam in cameras:                        # dọn khi dừng
-        cam._release_cap()
-
-
 def main():
     print("Đang khởi tạo các camera...")
     cameras = build_cameras()
-    paired = CAPTURE_MODE == "paired"
-    stop_event = None
-    capture_thread = None
-    if paired:
-        # Chế độ ẢNH luân phiên từng cặp: 1 thread nền tự mở/chụp/đóng từng cặp.
-        print("Chế độ PAIRED: luân phiên từng cặp (mỗi lúc chỉ 2 cam mở).")
-        stop_event = threading.Event()
-        capture_thread = threading.Thread(
-            target=_paired_capture_loop, args=(cameras, stop_event), daemon=True)
-        capture_thread.start()
-    else:
-        # Chế độ LIVE: mỗi cam 1 thread đọc riêng. Giãn start để USB negotiate ổn định.
-        for cam in cameras:
-            cam.start()
-            time.sleep(0.4)
+    # Mỗi cam tự chạy thread đọc riêng. Giãn cách lúc start để USB negotiate ổn định.
+    for cam in cameras:
+        cam.start()
+        time.sleep(0.4)
 
     # Pre-allocate canvas + cache ô "mất kết nối" (Pillow text rất chậm).
     canvas = allocate_canvas()
@@ -208,18 +174,17 @@ def main():
 
     try:
         while True:
-            # Watchdog "đứng hình" CHỈ cho chế độ LIVE: cam đang MỞ mà không có
-            # khung mới quá FREEZE_TIMEOUT (grab() treo do rung USB) -> ép reset.
-            # Chế độ paired tự mở/đóng theo cặp nên không cần (và không được) watchdog.
-            if not paired:
-                now = time.time()
-                for cam in cameras:
-                    if (cam.cap is not None and not cam._reset_requested
-                            and cam.last_frame_time > 0.0
-                            and now - cam.last_frame_time > FREEZE_TIMEOUT):
-                        print(f"[watchdog] {cam.name} đứng hình "
-                              f"{now - cam.last_frame_time:.1f}s -> ép reset.")
-                        cam.request_reset()
+            # Watchdog "đứng hình": cam đang MỞ mà không có khung mới quá
+            # FREEZE_TIMEOUT (vd grab() treo do rung USB) -> ép reset. Cam rớt hẳn
+            # (cap=None) do đường grab-fail tự lo, bỏ qua ở đây.
+            now = time.time()
+            for cam in cameras:
+                if (cam.cap is not None and not cam._reset_requested
+                        and cam.last_frame_time > 0.0
+                        and now - cam.last_frame_time > FREEZE_TIMEOUT):
+                    print(f"[watchdog] {cam.name} đứng hình "
+                          f"{now - cam.last_frame_time:.1f}s -> ép reset.")
+                    cam.request_reset()
 
             build_grid_into(canvas, cameras, disconnected_cells)
             cv2.imshow(WINDOW_NAME, canvas)
@@ -246,16 +211,8 @@ def main():
                 next_tick = time.time()   # tụt nhịp -> reset, không tích nợ thời gian
     finally:
         print("Đang đóng camera...")
-        if paired:
-            if stop_event is not None:
-                stop_event.set()
-            if capture_thread is not None:
-                capture_thread.join(timeout=3.0)
-            for cam in cameras:
-                cam._release_cap()
-        else:
-            for cam in cameras:
-                cam.stop()
+        for cam in cameras:
+            cam.stop()
         cv2.destroyAllWindows()
         print("Đã thoát.")
 
