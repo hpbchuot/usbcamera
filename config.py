@@ -45,8 +45,8 @@ CAMERA_INSTANCE_IDS = [
     r"USB\VID_4C4A&PID_4A55&MI_00\6&540102a&0&0000",   # CAM 2 -> trên-trái
     r"USB\VID_4C4A&PID_4A55&MI_00\6&2e21298c&0&0000",  # CAM 3 -> dưới-giữa
     r"USB\VID_4C4A&PID_4A55&MI_00\6&1b6778e7&0&0000",  # CAM 4 -> trên-giữa
-    r"USB\VID_4C4A&PID_4A55&MI_00\6&8adc842&0&0000",   # CAM 5 -> dưới-phải
-    r"USB\VID_4C4A&PID_4A55&MI_00\6&a0be863&0&0000",   # CAM 6 -> trên-phải
+    r"USB\VID_4C4A&PID_4A55&MI_00\7&1543a2f&0&0000",   # CAM 5 -> dưới-phải
+    r"USB\VID_4C4A&PID_4A55&MI_00\7&2a355391&0&0000",   # CAM 6 -> trên-phải
 ]
 
 # Từ khóa tên camera ẢO cần loại khi liệt kê (so khớp không phân biệt hoa/thường).
