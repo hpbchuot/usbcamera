@@ -26,11 +26,16 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      # BỎ --noconsole để exe có cửa sổ console hiển thị log (soi bảng
+      # "Ánh xạ CAM -> instance_id -> index" xác nhận lib định danh chạy được,
+      # hay cảnh báo "[!!] THIẾU thư viện cv2_enumerate_cameras"). Khi đã ổn định
+      # có thể thêm lại --noconsole.
       - name: Build EXE (multi_camera_viewer)
         run: >
-          pyinstaller --onefile --noconsole
+          pyinstaller --onefile
           --name MultiCameraViewer
           --collect-all cv2_enumerate_cameras
+          --collect-submodules cv2_enumerate_cameras
           --collect-all cv2
           multi_camera_viewer.py
 

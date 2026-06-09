@@ -9,6 +9,7 @@ Chạy:
     python multi_camera_viewer.py --detect   # dò index DSHOW thô (fallback)
 
 Phím tắt:  q/ESC thoát | f toàn màn hình | s chụp ảnh lưới (.jpg)
+           R làm mới (đóng & mở lại) toàn bộ 6 camera
 """
 
 import cv2
@@ -122,27 +123,37 @@ def build_grid_into(canvas, cameras, disconnected_cells):
 # ============================================================
 def build_cameras():
     """Tạo danh sách Camera cho ô 1..N (chỉ số list = CAM (i+1)).
-    - Ưu tiên CAMERA_INSTANCE_IDS (ổn định theo cổng USB); in bảng đối chiếu.
-    - Để trống / thiếu lib -> fallback CAMERA_INDICES (index DSHOW thủ công)."""
+    - Có CAMERA_INSTANCE_IDS -> LUÔN dùng chế độ định danh theo instance_id (ổn
+      định theo cổng USB). KHÔNG tự rơi về index thô kể cả khi thiếu lib, vì index
+      thô bị XÁO khi rút/cắm lại (-> sai ô). Thiếu lib -> ô hiện 'mất kết nối' +
+      cảnh báo to (phải bundle lib vào exe), KHÔNG xáo.
+    - CAMERA_INSTANCE_IDS rỗng -> chế độ index thô CAMERA_INDICES (thủ công)."""
     n_cells = GRID_COLS * GRID_ROWS
     cameras = []
-    cams = list_real_cameras() if CAMERA_INSTANCE_IDS else None
-    if CAMERA_INSTANCE_IDS and cams is None:
-        print("[!] Không liệt kê được camera (thiếu lib) -> fallback CAMERA_INDICES.")
-    if CAMERA_INSTANCE_IDS and cams is not None:
+    if CAMERA_INSTANCE_IDS:
+        cams = list_real_cameras()
+        if cams is None:
+            print("[!!] THIẾU thư viện cv2_enumerate_cameras -> KHÔNG resolve được "
+                  "instance_id. Các ô sẽ hiện 'mất kết nối'. PHẢI đóng gói lib vào "
+                  "exe (PyInstaller: --collect-all cv2_enumerate_cameras). "
+                  "KHÔNG tự dùng index thô để tránh XÁO Ô khi cắm lại.")
+        else:
+            print("Ánh xạ CAM -> instance_id -> index:")
+            preview = (list(CAMERA_INSTANCE_IDS) + [None] * n_cells)[:n_cells]
+            for i, target in enumerate(preview):
+                idx = find_index_by_instance(target, cams)
+                tail = (target or "").split("\\")[-1]
+                print(f"  CAM {i + 1}: ...{tail or '(trống)'} -> "
+                      f"{'index ' + str(idx) if idx is not None else 'CHƯA THẤY'}")
+        # Luôn dựng cam ở chế độ target (instance_id); _open() resolve mỗi lần mở.
         targets = (list(CAMERA_INSTANCE_IDS) + [None] * n_cells)[:n_cells]
-        print("Ánh xạ CAM -> instance_id -> index:")
         for i, target in enumerate(targets):
-            idx = find_index_by_instance(target, cams or [])
-            tail = (target or "").split("\\")[-1]
-            print(f"  CAM {i + 1}: ...{tail or '(trống)'} -> "
-                  f"{'index ' + str(idx) if idx is not None else 'CHƯA THẤY'}")
             cameras.append(Camera(name=f"CAM {i + 1}", number=i + 1,
                                   cell_size=(CELL_WIDTH, CELL_HEIGHT),
                                   target=target,
                                   rotate180=(i + 1) in ROTATE_180_CAMS))
         return cameras
-    # Fallback: index thủ công
+    # CAMERA_INSTANCE_IDS rỗng -> index thô thủ công (chấp nhận có thể xáo khi cắm lại).
     srcs = (list(CAMERA_INDICES) + [None] * n_cells)[:n_cells]
     for i, src in enumerate(srcs):
         cameras.append(Camera(name=f"CAM {i + 1}", number=i + 1,
@@ -165,7 +176,8 @@ def main():
 
     cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
     fullscreen = False
-    print("Bắt đầu hiển thị. Phím: q/ESC thoát | f toàn màn hình | s chụp ảnh")
+    print("Bắt đầu hiển thị. Phím: q/ESC thoát | f toàn màn hình | "
+          "s chụp ảnh | R làm mới 6 cam")
 
     # Nhịp ghép lưới + hiển thị. Cap ~30fps để cửa sổ mượt + waitKey gọi đều
     # (Windows không báo "Not Responding").
@@ -201,6 +213,13 @@ def main():
                 fname = datetime.now().strftime("capture_%Y%m%d_%H%M%S.jpg")
                 cv2.imwrite(fname, canvas)
                 print(f"[+] Đã lưu {fname}")
+            elif key in (ord("r"), ord("R")):
+                # Làm mới TOÀN BỘ 6 cam: ép đóng & mở lại (dò lại index theo
+                # instance_id). Dùng đúng cơ chế watchdog (request_reset) nên thread
+                # mỗi cam tự xử lý, bỏ qua cooldown -> mở lại ngay.
+                print("[R] Làm mới toàn bộ 6 camera (đóng & mở lại)...")
+                for cam in cameras:
+                    cam.request_reset()
 
             # Giữ nhịp display: ngủ phần dư trong period.
             next_tick += frame_period

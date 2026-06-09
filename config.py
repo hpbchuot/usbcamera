@@ -18,7 +18,7 @@ BỐ CỤC LƯỚI 3x2 (số CHẴN hàng TRÊN, số LẺ hàng DƯỚI, theo c
         CAM2   CAM4   CAM6
         CAM1   CAM3   CAM5
 
-Phím tắt:  q/ESC thoát | f toàn màn hình | s chụp ảnh lưới (.jpg)
+Phím tắt:  q/ESC thoát | f toàn màn hình | s chụp ảnh lưới (.jpg) | R làm mới 6 cam
 Cài đặt:   pip install opencv-python numpy pillow cv2-enumerate-cameras
 
 Tách 3 file:
@@ -41,12 +41,12 @@ Tách 3 file:
 #       CAM1   CAM3   CAM5   (hàng dưới)
 # Dùng raw-string (r"...") vì instance_id có dấu \.
 CAMERA_INSTANCE_IDS = [
-    r"USB\VID_4C4A&PID_4A55&MI_00\6&17f9c0cf&0&0000",  # CAM 1 -> dưới-trái
-    r"USB\VID_4C4A&PID_4A55&MI_00\6&540102a&0&0000",   # CAM 2 -> trên-trái
+    r"USB\VID_4C4A&PID_4A55&MI_00\6&8adc842&0&0000",  # CAM 1 -> dưới-trái
+    r"USB\VID_4C4A&PID_4A55&MI_00\6&a0be863&0&0000",   # CAM 2 -> trên-trái
     r"USB\VID_4C4A&PID_4A55&MI_00\6&2e21298c&0&0000",  # CAM 3 -> dưới-giữa
     r"USB\VID_4C4A&PID_4A55&MI_00\6&1b6778e7&0&0000",  # CAM 4 -> trên-giữa
-    r"USB\VID_4C4A&PID_4A55&MI_00\7&1543a2f&0&0000",   # CAM 5 -> dưới-phải
-    r"USB\VID_4C4A&PID_4A55&MI_00\7&140dead4&0&0000",   # CAM 6 -> trên-phải
+    r"USB\VID_4C4A&PID_4A55&MI_00\7&1962d0b&0&0000",   # CAM 5 -> dưới-phải
+    r"USB\VID_4C4A&PID_4A55&MI_00\7&144fddb0&0&0000",   # CAM 6 -> trên-phải
 ]
 
 # Từ khóa tên camera ẢO cần loại khi liệt kê (so khớp không phân biệt hoa/thường).
