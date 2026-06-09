@@ -76,6 +76,27 @@ CAPTURE_HEIGHT = 720
 CAPTURE_FPS = 30
 CAPTURE_FOURCC = "MJPG"
 
+# ============================================================
+# CHẾ ĐỘ HIỂN THỊ
+# ============================================================
+# "live"   : 6 cam mở liên tục, mỗi cam 1 thread (nặng USB+CPU; cần phần cứng khỏe).
+# "paired" : luân phiên TỪNG CẶP (1-2 -> 3-4 -> 5-6). Mở cặp -> chụp ảnh -> ĐÓNG ->
+#            cặp kế. Chỉ 2 cam MỞ cùng lúc -> nhẹ USB (hết treo/crash do hết băng
+#            thông isochronous khi mở >~2 cam/controller) + nhẹ CPU. Ô của cặp chưa
+#            tới lượt giữ ẢNH chụp gần nhất (đứng yên) cho tới lượt sau.
+CAPTURE_MODE = "paired"
+
+# (paired) Các CẶP theo CHỈ SỐ ô 0..5 (CAM = chỉ số + 1). Mặc định (1,2)(3,4)(5,6).
+CAMERA_PAIRS = [(0, 1), (2, 3), (4, 5)]
+
+# (paired) Số khung XẢ bỏ ngay sau khi mở để loại ảnh cũ trong buffer trước khi chụp.
+SNAPSHOT_FLUSH = 4
+
+# (paired) Giữ hiển thị mỗi cặp bao lâu (giây) trước khi đóng & sang cặp kế. Tăng
+# để xem mỗi cặp lâu hơn; giảm/0 để luân phiên nhanh hơn. Mỗi vòng còn tốn thời
+# gian MỞ cam (~0.5-1.5s/cặp) nên chu kỳ thực tế lớn hơn giá trị này.
+PAIR_DWELL = 0.8
+
 # Kích thước MỖI Ô hiển thị (16:9). 640x360 x lưới 3x2 => cửa sổ 1920x720.
 CELL_WIDTH = 640
 CELL_HEIGHT = 360
