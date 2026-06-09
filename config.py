@@ -63,10 +63,16 @@ ROTATE_180_CAMS = [1, 3, 5]
 # ============================================================
 # ĐỘ PHÂN GIẢI / LƯỚI / NHỊP
 # ============================================================
-# Độ phân giải bắt từ camera (nguồn). HD 720p 16:9 - cân băng thông USB + CPU.
-CAPTURE_WIDTH = 1280
-CAPTURE_HEIGHT = 720
+# Độ phân giải + codec bắt từ camera (nguồn).
+# 640x480 + YUY2 (raw): YUY2 KHÔNG nén -> KHÔNG tốn CPU giải mã (bỏ được "sàn
+# decode" của MJPEG) => CPU nhẹ hơn NHIỀU. Đổi lại NẶNG băng thông USB
+# (~147 Mbps/cam @640x480@30). 4 cam qua hub ≈ 590 Mbps -> CẦN hub USB 3.0
+# (USB 2.0 ~480 Mbps sẽ nghẽn: tụt FPS/rớt khung). Đổi CAPTURE_FOURCC="MJPG"
+# (nén, nhẹ USB nhưng nặng CPU decode) nếu hub không gánh nổi raw.
+CAPTURE_WIDTH = 640
+CAPTURE_HEIGHT = 480
 CAPTURE_FPS = 30
+CAPTURE_FOURCC = "YUY2"
 
 # Kích thước MỖI Ô hiển thị (16:9). 640x360 x lưới 3x2 => cửa sổ 1920x720.
 CELL_WIDTH = 640

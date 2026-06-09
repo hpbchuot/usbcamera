@@ -12,8 +12,9 @@ import cv2
 import time
 import threading
 
-from config import (CAPTURE_WIDTH, CAPTURE_HEIGHT, CAPTURE_FPS, VIRTUAL_KEYWORDS,
-                    DISPLAY_FPS, RECONNECT_INTERVAL, GRAB_FPS, GRAB_FAIL_LIMIT)
+from config import (CAPTURE_WIDTH, CAPTURE_HEIGHT, CAPTURE_FPS, CAPTURE_FOURCC,
+                    VIRTUAL_KEYWORDS, DISPLAY_FPS, RECONNECT_INTERVAL,
+                    GRAB_FPS, GRAB_FAIL_LIMIT)
 
 # Serialize mở VideoCapture + enumerate trên DSHOW. Mở 6 cam song song dễ xung đột
 # USB negotiate; enumerate song song (nhiều cam cùng reconnect lúc rút dây) trả
@@ -130,8 +131,9 @@ class Camera:
             if self.src is None:                 # không resolve được -> coi như chưa cắm
                 return False
             cap = cv2.VideoCapture(self.src, cv2.CAP_DSHOW)
-            # Ép MJPG TRƯỚC khi set độ phân giải để tránh nghẽn băng thông USB.
-            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+            # Ép codec (CAPTURE_FOURCC) TRƯỚC khi set độ phân giải. YUY2=raw (nhẹ
+            # CPU, nặng USB) / MJPG=nén (nặng CPU decode, nhẹ USB). Xem config.
+            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*CAPTURE_FOURCC))
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAPTURE_WIDTH)
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAPTURE_HEIGHT)
             cap.set(cv2.CAP_PROP_FPS, CAPTURE_FPS)
