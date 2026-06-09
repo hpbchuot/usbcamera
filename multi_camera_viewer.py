@@ -15,13 +15,15 @@ Phím tắt:  q/ESC thoát | f toàn màn hình | s chụp ảnh lưới (.jpg)
 import cv2
 import sys
 import time
+import threading
 import numpy as np
 from datetime import datetime
 from PIL import Image, ImageDraw, ImageFont
 
 from config import (CAMERA_INSTANCE_IDS, CAMERA_INDICES, ROTATE_180_CAMS,
                     CELL_WIDTH, CELL_HEIGHT, GRID_COLS, GRID_ROWS,
-                    FREEZE_TIMEOUT, WINDOW_NAME)
+                    FREEZE_TIMEOUT, WINDOW_NAME,
+                    SEQUENTIAL_GROUPS, SEQ_DWELL)
 from camera import (Camera, list_real_cameras, find_index_by_instance,
                     draw_index_badge, detect_cameras)
 
@@ -162,13 +164,53 @@ def build_cameras():
     return cameras
 
 
+def _sequential_group_loop(cameras, slots, stop_event):
+    """Luân phiên các cam trong 1 NHÓM TUẦN TỰ: mở 1 cam -> chụp ảnh vào ô -> giữ
+    SEQ_DWELL giây -> ĐÓNG -> cam kế. LUÔN chỉ 1 cam trong nhóm MỞ cùng lúc (hợp
+    giới hạn hub không cho 2 live). Chạy 1 thread nền; ô giữ ảnh gần nhất tới lượt sau."""
+    members = [cameras[i] for i in slots if 0 <= i < len(cameras)]
+    while not stop_event.is_set():
+        for cam in members:
+            if stop_event.is_set():
+                break
+            cam.snapshot()                 # mở (nếu cần) + chụp 1 ảnh tươi vào ô
+            stop_event.wait(SEQ_DWELL)      # giữ ảnh một lúc (vẫn thoát nhanh)
+            cam._release_cap()              # ĐÓNG để nhường cho cam kế trong nhóm
+    for cam in members:
+        cam._release_cap()
+
+
 def main():
     print("Đang khởi tạo các camera...")
     cameras = build_cameras()
-    # Mỗi cam tự chạy thread đọc riêng. Giãn cách lúc start để USB negotiate ổn định.
-    for cam in cameras:
+
+    # Slot nằm trong nhóm tuần tự (chụp luân phiên); còn lại chạy LIVE.
+    seq_slots = set()
+    for g in SEQUENTIAL_GROUPS:
+        seq_slots.update(i for i in g if 0 <= i < len(cameras))
+
+    # Cam LIVE: mỗi cam 1 thread đọc liên tục. Giãn start để USB negotiate ổn định.
+    # Cam trong nhóm tuần tự KHÔNG start thread live (orchestrator điều khiển mở/đóng).
+    for i, cam in enumerate(cameras):
+        if i in seq_slots:
+            continue
         cam.start()
         time.sleep(0.4)
+
+    # Orchestrator cho từng nhóm tuần tự (1 thread/nhóm, chỉ 1 cam mở/lúc trong nhóm).
+    stop_event = threading.Event()
+    seq_threads = []
+    for g in SEQUENTIAL_GROUPS:
+        slots = [i for i in g if 0 <= i < len(cameras)]
+        if not slots:
+            continue
+        t = threading.Thread(target=_sequential_group_loop,
+                             args=(cameras, slots, stop_event), daemon=True)
+        t.start()
+        seq_threads.append(t)
+    if seq_threads:
+        groups_view = [[i + 1 for i in g] for g in SEQUENTIAL_GROUPS]
+        print(f"Nhóm tuần tự (CAM, chỉ 1 cam mở/lúc trong nhóm): {groups_view}")
 
     # Pre-allocate canvas + cache ô "mất kết nối" (Pillow text rất chậm).
     canvas = allocate_canvas()
@@ -186,11 +228,13 @@ def main():
 
     try:
         while True:
-            # Watchdog "đứng hình": cam đang MỞ mà không có khung mới quá
-            # FREEZE_TIMEOUT (vd grab() treo do rung USB) -> ép reset. Cam rớt hẳn
-            # (cap=None) do đường grab-fail tự lo, bỏ qua ở đây.
+            # Watchdog "đứng hình" CHỈ cho cam LIVE: cam đang MỞ mà không có khung
+            # mới quá FREEZE_TIMEOUT (grab() treo do rung USB) -> ép reset. Cam
+            # trong nhóm tuần tự (cap tạm thời do orchestrator quản) -> bỏ qua.
             now = time.time()
-            for cam in cameras:
+            for i, cam in enumerate(cameras):
+                if i in seq_slots:
+                    continue
                 if (cam.cap is not None and not cam._reset_requested
                         and cam.last_frame_time > 0.0
                         and now - cam.last_frame_time > FREEZE_TIMEOUT):
@@ -214,12 +258,15 @@ def main():
                 cv2.imwrite(fname, canvas)
                 print(f"[+] Đã lưu {fname}")
             elif key in (ord("r"), ord("R")):
-                # Làm mới TOÀN BỘ 6 cam: ép đóng & mở lại (dò lại index theo
-                # instance_id). Dùng đúng cơ chế watchdog (request_reset) nên thread
-                # mỗi cam tự xử lý, bỏ qua cooldown -> mở lại ngay.
+                # Làm mới TOÀN BỘ: cam LIVE -> request_reset (thread tự đóng & mở
+                # lại, dò lại index, bỏ qua cooldown). Cam nhóm tuần tự -> chỉ đóng
+                # cap, orchestrator sẽ mở lại ở lượt chụp kế.
                 print("[R] Làm mới toàn bộ 6 camera (đóng & mở lại)...")
-                for cam in cameras:
-                    cam.request_reset()
+                for i, cam in enumerate(cameras):
+                    if i in seq_slots:
+                        cam._release_cap()
+                    else:
+                        cam.request_reset()
 
             # Giữ nhịp display: ngủ phần dư trong period.
             next_tick += frame_period
@@ -230,8 +277,14 @@ def main():
                 next_tick = time.time()   # tụt nhịp -> reset, không tích nợ thời gian
     finally:
         print("Đang đóng camera...")
-        for cam in cameras:
-            cam.stop()
+        stop_event.set()                       # dừng các orchestrator nhóm tuần tự
+        for t in seq_threads:
+            t.join(timeout=3.0)
+        for i, cam in enumerate(cameras):
+            if i in seq_slots:
+                cam._release_cap()             # cam tuần tự: orchestrator đã dừng
+            else:
+                cam.stop()                     # cam live: dừng thread đọc + release
         cv2.destroyAllWindows()
         print("Đã thoát.")
 

@@ -42,7 +42,7 @@ Tách 3 file:
 # Dùng raw-string (r"...") vì instance_id có dấu \.
 CAMERA_INSTANCE_IDS = [
     r"USB\VID_4C4A&PID_4A55&MI_00\6&8adc842&0&0000",  # CAM 1 -> dưới-trái
-    r"USB\VID_4C4A&PID_4A55&MI_00\6&a0be863&0&0000",   # CAM 2 -> trên-trái
+    r"USB\VID_4C4A&PID_4A55&MI_00\6&540102a&0&0000",   # CAM 2 -> trên-trái
     r"USB\VID_4C4A&PID_4A55&MI_00\6&2e21298c&0&0000",  # CAM 3 -> dưới-giữa
     r"USB\VID_4C4A&PID_4A55&MI_00\6&1b6778e7&0&0000",  # CAM 4 -> trên-giữa
     r"USB\VID_4C4A&PID_4A55&MI_00\7&1962d0b&0&0000",   # CAM 5 -> dưới-phải
@@ -75,6 +75,22 @@ CAPTURE_WIDTH = 1280
 CAPTURE_HEIGHT = 720
 CAPTURE_FPS = 30
 CAPTURE_FOURCC = "MJPG"
+
+# ============================================================
+# NHÓM TUẦN TỰ (cho cam bị nghẽn băng thông, vd chung 1 hub không cho 2 live)
+# ============================================================
+# Mỗi nhóm = danh sách CHỈ SỐ ô 0..5 (CAM = chỉ số+1) mà phần cứng KHÔNG cho mở
+# cùng lúc. Module luân phiên trong nhóm: mở 1 cam -> chụp ảnh vào ô -> ĐÓNG ->
+# cam kế (luôn CHỈ 1 cam trong nhóm MỞ cùng lúc -> hợp giới hạn hub). Cam KHÔNG
+# nằm trong nhóm nào -> chạy LIVE bình thường.
+# [] = không có nhóm (tất cả live). VD CAM5+CAM6 chung 1 hub: [[4, 5]].
+SEQUENTIAL_GROUPS = [[4, 5]]
+
+# (tuần tự) Giữ ảnh mỗi cam trong nhóm bao lâu (giây) trước khi đóng & sang cam kế.
+SEQ_DWELL = 0.8
+
+# (tuần tự) Số khung XẢ bỏ sau khi mở để loại ảnh cũ trong buffer trước khi chụp.
+SNAPSHOT_FLUSH = 4
 
 # Kích thước MỖI Ô hiển thị (16:9). 640x360 x lưới 3x2 => cửa sổ 1920x720.
 CELL_WIDTH = 640

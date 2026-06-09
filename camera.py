@@ -14,7 +14,7 @@ import threading
 
 from config import (CAPTURE_WIDTH, CAPTURE_HEIGHT, CAPTURE_FPS, CAPTURE_FOURCC,
                     VIRTUAL_KEYWORDS, DISPLAY_FPS, RECONNECT_INTERVAL,
-                    GRAB_FPS, GRAB_FAIL_LIMIT)
+                    GRAB_FPS, GRAB_FAIL_LIMIT, SNAPSHOT_FLUSH)
 
 # Serialize mở VideoCapture + enumerate trên DSHOW. Mở 6 cam song song dễ xung đột
 # USB negotiate; enumerate song song (nhiều cam cùng reconnect lúc rút dây) trả
@@ -167,6 +167,31 @@ class Camera:
         draw_label(cell, self.name, self.src, self.fps)
         draw_index_badge(cell, self.number)
         return cell
+
+    def snapshot(self, flush=SNAPSHOT_FLUSH):
+        """[nhóm tuần tự] Mở (nếu chưa) -> XẢ vài khung cũ trong buffer -> đọc 1
+        khung -> render vào self.cell. KHÔNG tự release (orchestrator đóng sau khi
+        giữ ảnh). Trả True nếu cập nhật được ô. Lỗi -> cell=None + nuốt exception
+        để 1 cam hỏng không làm sập vòng tuần tự."""
+        try:
+            if self.cap is None or not self.cap.isOpened():
+                if not self._open():
+                    self.cell = None
+                    return False
+            for _ in range(max(0, flush)):       # bỏ ảnh cũ kẹt trong buffer
+                self.cap.grab()
+            ok, frame = self.cap.read()          # grab + retrieve 1 khung tươi
+            if not ok or frame is None:
+                self._release_cap()
+                self.cell = None
+                return False
+            self.cell = self._render_cell(frame)
+            return True
+        except Exception as e:
+            print(f"[!] {self.name} (dev {self.src}) lỗi snapshot: {e}")
+            self._release_cap()
+            self.cell = None
+            return False
 
     def start(self):
         """Bật thread daemon đọc của riêng cam này."""
