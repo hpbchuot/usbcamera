@@ -1,165 +1,28 @@
 """
-Multi-Camera Viewer - Hiển thị 6 webcam USB (720p) trên 1 màn hình
-====================================================================
-Chế độ MỖI CAM 1 THREAD RIÊNG (continuous-grab, trễ thấp):
-- Mỗi cam có 1 thread daemon liên tục grab() để XẢ buffer DirectShow nên khung
-  luôn TƯƠI (trễ ~1-2 frame thay vì 1-3s). DSHOW thường bỏ qua BUFFERSIZE=1 ->
-  đọc liên tục là cách tin cậy để buffer luôn rỗng.
-- Chỉ retrieve() (decode) + vẽ theo nhịp DISPLAY_FPS để tiết chế CPU; grab() xả
-  buffer thì rẻ (không decode) nên vẫn nhẹ.
-- Mỗi cam chỉ ghi vào Ô CỦA RIÊNG NÓ -> 1 cam mất KHÔNG làm ô cam khác đổi/mất
-  hình; tự mở lại trong chính thread của nó nên không kẹt cam khác.
-Tự kết nối lại trong nền:
-    * Camera chưa cắm  -> ô đó hiện "Kiểm tra lại kết nối camera N".
-    * Cắm vào lúc sau  -> ô đó tự hiện hình, không cần khởi động lại app.
-    * Bị rút giữa chừng -> quay lại hiện dòng cảnh báo, các cam khác vẫn chạy.
-- Ép codec MJPG để tiết kiệm băng thông USB; in codec/độ phân giải THỰC TẾ
-  lúc mở để soi cam nào rớt về raw (YUYV) gây nghẽn.
-- Chữ tiếng Việt vẽ bằng Pillow (cv2.putText không hỗ trợ dấu).
+multi_camera_viewer.py - UI ghép lưới + main loop + CLI (entry point).
+======================================================================
+Hiển thị 6 webcam USB trên lưới 3x2. Xem mô tả kiến trúc đầy đủ trong config.py.
 
-ĐỊNH DANH CAMERA THEO INSTANCE_ID (ổn định theo cổng USB vật lý):
-- Mỗi CAM khớp theo instance_id (CAMERA_INSTANCE_IDS) bằng cv2_enumerate_cameras
-  -> miễn nhiễm với việc index DSHOW bị đảo do có camera ảo (ManyCam) / cắm lại.
-- Lấy instance_id:  python multi_camera_viewer.py discover
+Chạy:
+    python multi_camera_viewer.py            # mở viewer
+    python multi_camera_viewer.py discover   # liệt kê cam thật + path (lấy instance_id)
+    python multi_camera_viewer.py --detect   # dò index DSHOW thô (fallback)
 
-BỐ CỤC LƯỚI 3x2 (số chẵn HÀNG TRÊN, số lẻ HÀNG DƯỚI, theo cột):
-        CAM2   CAM4   CAM6
-        CAM1   CAM3   CAM5
-
-Phím tắt:
-    q hoặc ESC : thoát
-    f          : bật/tắt toàn màn hình
-    s          : chụp ảnh lưới hiện tại (lưu ra file .jpg)
-
-Cài đặt: pip install opencv-python numpy pillow cv2-enumerate-cameras
-
-Tác giả: viết cho Tys
+Phím tắt:  q/ESC thoát | f toàn màn hình | s chụp ảnh lưới (.jpg)
 """
 
 import cv2
 import sys
 import time
-import threading
 import numpy as np
 from datetime import datetime
 from PIL import Image, ImageDraw, ImageFont
 
-# ============================================================
-# CẤU HÌNH - chỉnh ở đây
-# ============================================================
-
-# --- ĐỊNH DANH CAMERA THEO INSTANCE_ID (ổn định theo cổng USB vật lý) ---
-# Mỗi CAM khớp theo device instance_id (lấy từ Device Manager -> Details ->
-# "Device instance path", hoặc chạy: python multi_camera_viewer.py discover).
-# Khớp bằng so-substring đã chuẩn hóa với 'path' của cv2_enumerate_cameras nên
-# miễn nhiễm khác biệt dấu \ vs # và chữ hoa/thường. Index DSHOW có thể đảo khi
-# có camera ảo / cắm lại, nhưng instance_id thì cố định theo cổng -> luôn đúng ô.
-#
-# Thứ tự CAM 1..6 ánh xạ ra bố cục lưới (số chẵn HÀNG TRÊN, số lẻ HÀNG DƯỚI):
-#       CAM2   CAM4   CAM6   (hàng trên)
-#       CAM1   CAM3   CAM5   (hàng dưới)
-# Dùng raw-string (r"...") vì instance_id có dấu \.
-CAMERA_INSTANCE_IDS = [
-    r"USB\VID_4C4A&PID_4A55&MI_00\6&17f9c0cf&0&0000",  # CAM 1 -> dưới-trái
-    r"USB\VID_4C4A&PID_4A55&MI_00\6&540102a&0&0000",   # CAM 2 -> trên-trái
-    r"USB\VID_4C4A&PID_4A55&MI_00\6&2e21298c&0&0000",  # CAM 3 -> dưới-giữa
-    r"USB\VID_4C4A&PID_4A55&MI_00\6&1b6778e7&0&0000",  # CAM 4 -> trên-giữa
-    r"USB\VID_4C4A&PID_4A55&MI_00\6&8adc842&0&0000",   # CAM 5 -> dưới-phải
-    r"USB\VID_4C4A&PID_4A55&MI_00\6&a0be863&0&0000",   # CAM 6 -> trên-phải
-]
-
-# Từ khóa tên camera ẢO cần loại bỏ khi liệt kê (ManyCam, OBS...). So khớp
-# không phân biệt hoa/thường.
-VIRTUAL_KEYWORDS = ["manycam", "obs", "virtual", "xsplit",
-                    "snap camera", "droidcam", "splitcam", "e2esoft", "iriun"]
-
-# Fallback khi CAMERA_INSTANCE_IDS để trống ([]) hoặc thiếu thư viện enumerate:
-# dùng index DSHOW thủ công cho từng ô 1..6 (dò bằng --detect).
-CAMERA_INDICES = [0, 1, 2, 3, 4, 5]
-
-# Các CAM (theo SỐ thứ tự 1..6) cần xoay khung hình 180° (cam lắp ngược).
-# Mặc định CAM hàng dưới (1,3,5).
-ROTATE_180_CAMS = [1, 3, 5]
-
-# Độ phân giải bắt từ camera (nguồn). HD 720p 16:9.
-# Hạ từ 1080p -> 720p để giảm băng thông USB + CPU giải mã MJPEG.
-CAPTURE_WIDTH = 1280
-CAPTURE_HEIGHT = 720
-CAPTURE_FPS = 30
-
-# Kích thước MỖI Ô hiển thị (giữ tỉ lệ 16:9).
-# 640x360 x lưới 3x2 => cửa sổ 1920x720.
-CELL_WIDTH = 640
-CELL_HEIGHT = 360
-
-# Bố cục lưới: 3 cột x 2 hàng = 6 ô
-GRID_COLS = 3
-GRID_ROWS = 2
-
-# --- Chế độ MỖI CAM 1 THREAD RIÊNG (continuous-grab) ---
-# Mỗi cam có 1 thread daemon liên tục grab() để XẢ buffer DirectShow (DSHOW
-# thường bỏ qua CAP_PROP_BUFFERSIZE=1, đọc thưa sẽ dồn khung cũ gây trễ 1-3s).
-# grab() rẻ (không decode); chỉ retrieve()+render theo nhịp DISPLAY_FPS để nhẹ CPU.
-DISPLAY_FPS = 10            # nhịp decode + render mỗi cam (chỉnh cân CPU/độ mượt)
-# Cooldown thử MỞ LẠI 1 camera đang mất (giây). Mở DirectShow một camera đã rớt
-# có thể block ~1-3s; giãn ra để thread của cam đó không thử mở lại dồn dập.
-# (Mỗi cam thread riêng nên dù có block cũng KHÔNG ảnh hưởng cam khác.)
-RECONNECT_INTERVAL = 5.0
-# Watchdog "đứng hình": cam đang MỞ mà không có khung mới quá ngần này giây (vd
-# USB treo do rung khiến grab() bị block, không trả False) -> ép reset để kiểm
-# tra/khôi phục kết nối. Đặt > vài lần chu kỳ grab bình thường để không reset oan.
-FREEZE_TIMEOUT = 3.0
-
-WINDOW_NAME = "Multi-Camera Viewer (6 CAM)"
-
-# Khóa toàn cục: serialize việc mở VideoCapture trên DSHOW.
-# Mở 6 cam song song dễ gây xung đột USB negotiate -> 1-2 cam fail lúc khởi động.
-_OPEN_LOCK = threading.Lock()
-
-
-# ============================================================
-# LIỆT KÊ CAMERA THẬT + MAP INSTANCE_ID -> INDEX DSHOW
-# ============================================================
-# Dùng cv2_enumerate_cameras (pip install cv2-enumerate-cameras) để lấy
-# (index, name, path) của mọi camera DSHOW. 'path' chứa instance_id của thiết bị
-# nên ta khớp instance_id người dùng khai báo với path -> ra index hiện tại.
-def _norm(s):
-    """Chuẩn hóa chuỗi để so khớp: chữ thường + chỉ giữ ký tự alphanumeric.
-    Nhờ vậy 'USB\\VID_4C4A...\\6&17f9c0cf&0&0000' khớp được với path dạng
-    '\\\\?\\usb#vid_4c4a...#6&17f9c0cf&0&0000#{guid}\\global' (khác dấu \\ vs #)."""
-    return "".join(c for c in str(s).lower() if c.isalnum())
-
-
-def list_real_cameras():
-    """Liệt kê camera THẬT (loại camera ảo theo VIRTUAL_KEYWORDS).
-    Trả [(index, name, path), ...] theo thứ tự enumerate, hoặc None nếu thiếu lib."""
-    try:
-        from cv2_enumerate_cameras import enumerate_cameras
-    except Exception as e:
-        print(f"[!] Thiếu cv2-enumerate-cameras ({e}). "
-              f"Cài: pip install cv2-enumerate-cameras")
-        return None
-    cams = []
-    for info in enumerate_cameras(cv2.CAP_DSHOW):
-        name = info.name or ""
-        if any(k in name.lower() for k in VIRTUAL_KEYWORDS):
-            continue
-        cams.append((info.index, name, info.path or ""))
-    return cams
-
-
-def find_index_by_instance(target, cams):
-    """Tìm index DSHOW của camera có path khớp 'target' (instance_id hoặc path).
-    Khớp bằng _norm substring. Trả None nếu không thấy."""
-    if not target or not cams:
-        return None
-    key = _norm(target)
-    if not key:
-        return None
-    for index, _name, path in cams:
-        if key in _norm(path):
-            return index
-    return None
+from config import (CAMERA_INSTANCE_IDS, CAMERA_INDICES, ROTATE_180_CAMS,
+                    CELL_WIDTH, CELL_HEIGHT, GRID_COLS, GRID_ROWS,
+                    FREEZE_TIMEOUT, WINDOW_NAME)
+from camera import (Camera, list_real_cameras, find_index_by_instance,
+                    draw_index_badge, detect_cameras)
 
 
 # ============================================================
@@ -199,191 +62,17 @@ def put_text_vn_center(img, text, cy, size, color_bgr):
     tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
     x = (img.shape[1] - tw) // 2
     y = cy - th // 2
-    # PIL dùng RGB nên đảo thứ tự màu từ BGR
-    draw.text((x, y), text, font=font,
+    draw.text((x, y), text, font=font,            # PIL dùng RGB nên đảo BGR
               fill=(color_bgr[2], color_bgr[1], color_bgr[0]))
     return cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
-
-
-# ============================================================
-# LỚP ĐỌC CAMERA ĐA LUỒNG + TỰ KẾT NỐI LẠI
-# ============================================================
-class Camera:
-    """Bọc 1 VideoCapture + 1 thread daemon RIÊNG.
-
-    Thread liên tục grab() để XẢ buffer DirectShow (giữ khung luôn tươi, trễ
-    ~1-2 frame), chỉ retrieve()+render theo nhịp DISPLAY_FPS để nhẹ CPU. Mỗi cam
-    ghi vào self.cell của RIÊNG nó (gán tham chiếu là atomic dưới GIL -> main đọc
-    trực tiếp, không cần lock). Tự mở lại trong chính thread của nó -> 1 cam
-    mất/treo KHÔNG ảnh hưởng cam khác.
-    """
-
-    def __init__(self, name, number, cell_size, src=None, target=None,
-                 rotate180=False):
-        self.src = src                          # index DSHOW (có thể tự resolve)
-        self.target = target                    # instance_id/path để khớp ra index
-        self.name = name
-        self.number = number                    # số thứ tự 1..6 cho badge
-        self.cell_w, self.cell_h = cell_size
-        self.rotate180 = rotate180              # xoay ảnh 180° (cam lắp ngược)
-        self.cap = None
-        self.cell = None                        # ô đã render gần nhất (None=mất KN)
-        self.running = False
-        self.thread = None
-        # Mốc lần cuối THỬ mở (cho cooldown reconnect) - tránh mở lại dồn dập.
-        self._last_open_attempt = 0.0
-        # Watchdog "đứng hình": mốc lần cuối grab() thành công (có khung mới).
-        self.last_frame_time = 0.0
-        self._reset_requested = False           # watchdog đặt True để ép reset
-        # FPS quan sát được (1 / khoảng cách giữa 2 lần decode của cam này)
-        self.fps = 0.0
-        self._last_decode_t = 0.0
-
-    def _open(self):
-        """Thử mở camera. Trả True nếu mở được. In ra codec/độ phân giải THỰC TẾ
-        được negotiate để soi cam nào rớt về raw (YUYV) gây nghẽn băng thông.
-
-        TOÀN BỘ (dò index theo instance_id + mở) chạy trong _OPEN_LOCK để
-        SERIALIZE. Khi rút 1 cam làm nhiều cam reconnect cùng lúc, nếu dò
-        (enumerate) song song thì cv2_enumerate/DShow có thể trả index không nhất
-        quán -> 2 cam map nhầm cùng 1 index -> TRÙNG LUỒNG. Serialize loại bỏ điều đó."""
-        with _OPEN_LOCK:
-            # Dò index DSHOW HIỆN TẠI theo instance_id (bền với đảo index/camera ảo).
-            if self.target:
-                idx = find_index_by_instance(self.target, list_real_cameras() or [])
-                if idx is None:
-                    return False
-                self.src = idx
-            # src=None -> ô này không resolve được cổng -> coi như chưa cắm.
-            if self.src is None:
-                return False
-            cap = cv2.VideoCapture(self.src, cv2.CAP_DSHOW)
-            # Ép MJPG TRƯỚC khi set độ phân giải để tránh nghẽn băng thông USB.
-            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAPTURE_WIDTH)
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAPTURE_HEIGHT)
-            cap.set(cv2.CAP_PROP_FPS, CAPTURE_FPS)
-            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-            if cap.isOpened():
-                aw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-                ah = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-                fc = int(cap.get(cv2.CAP_PROP_FOURCC))
-                fourcc = "".join(chr((fc >> 8 * k) & 0xFF) for k in range(4))
-                print(f"[open] {self.name} (dev {self.src}): {aw}x{ah} {fourcc}")
-                self.cap = cap
-                return True
-            cap.release()
-            return False
-
-    def _release_cap(self):
-        if self.cap is not None:
-            try:
-                self.cap.release()
-            except Exception:
-                pass
-            self.cap = None
-
-    def _render_cell(self, frame):
-        """Resize khung nguồn -> cell + vẽ nhãn + badge.
-        Xoay 180° phần ẢNH nếu cam lắp ngược; nhãn/badge vẽ sau nên vẫn xuôi."""
-        if self.rotate180:
-            frame = cv2.rotate(frame, cv2.ROTATE_180)
-        cell = cv2.resize(frame, (self.cell_w, self.cell_h),
-                          interpolation=cv2.INTER_AREA)
-        draw_label(cell, self.name, self.src, self.fps)
-        draw_index_badge(cell, self.number)
-        return cell
-
-    def start(self):
-        """Bật thread daemon đọc của riêng cam này."""
-        self.running = True
-        self.thread = threading.Thread(target=self._run, daemon=True)
-        self.thread.start()
-        return self
-
-    def stop(self):
-        self.running = False
-        if self.thread is not None:
-            self.thread.join(timeout=2.0)
-        self._release_cap()
-
-    def request_reset(self):
-        """Watchdog (thread main) gọi khi cam đứng hình: đặt cờ + release cap từ
-        NGOÀI để phá grab() đang treo. Thread của cam sẽ thấy grab/loop trả về,
-        xử lý cờ ở đầu vòng rồi tự mở lại (dò lại index)."""
-        self._reset_requested = True
-        try:
-            if self.cap is not None:
-                self.cap.release()
-        except Exception:
-            pass
-
-    def _run(self):
-        """Vòng đọc riêng của cam: grab() liên tục để xả buffer (khung luôn tươi),
-        chỉ retrieve()+render theo nhịp DISPLAY_FPS. Tự mở lại khi rớt (cooldown).
-        1 cam mất/treo chỉ ảnh hưởng thread này, không kẹt cam khác."""
-        decode_period = 1.0 / DISPLAY_FPS
-        next_decode = time.time()
-        while self.running:
-            # (watchdog) Bị ép reset do đứng hình -> đóng cap & mở lại NGAY.
-            if self._reset_requested:
-                self._reset_requested = False
-                self._release_cap()              # idempotent (cap có thể đã release)
-                self.cell = None
-                self.last_frame_time = time.time()   # debounce watchdog
-                self._last_open_attempt = 0.0        # mở lại ngay, bỏ qua cooldown
-                continue
-
-            # (a) Đảm bảo cap mở; có cooldown để không thử mở lại dồn dập.
-            if self.cap is None or not self.cap.isOpened():
-                now = time.time()
-                if now - self._last_open_attempt < RECONNECT_INTERVAL:
-                    self.cell = None              # ô hiện "Kiểm tra lại kết nối"
-                    time.sleep(0.1)               # tránh spin trong lúc chờ cooldown
-                    continue
-                self._last_open_attempt = now
-                if not self._open():
-                    self.cell = None
-                    continue
-                print(f"[+] {self.name} (dev {self.src}) đã kết nối.")
-                self.last_frame_time = time.time()   # mốc khởi đầu cho watchdog
-                next_decode = time.time()
-
-            # (b) grab() liên tục XẢ buffer (rẻ, block ~1/fps); phát hiện rớt cáp.
-            if not self.cap.grab():
-                print(f"[!] {self.name} (dev {self.src}) mất kết nối.")
-                self._release_cap()
-                self.cell = None
-                continue
-            self.last_frame_time = time.time()       # có khung mới -> watchdog yên tâm
-
-            # (c) decode + render GIÃN theo DISPLAY_FPS để tiết chế CPU.
-            now = time.time()
-            if now >= next_decode:
-                ok, frame = self.cap.retrieve()
-                if not ok or frame is None:
-                    print(f"[!] {self.name} (dev {self.src}) mất kết nối.")
-                    self._release_cap()
-                    self.cell = None
-                    continue
-                if self._last_decode_t > 0.0:
-                    dt = now - self._last_decode_t
-                    if dt > 0:
-                        self.fps = 1.0 / dt
-                self._last_decode_t = now
-                self.cell = self._render_cell(frame)
-                next_decode = now + decode_period
 
 
 # ============================================================
 # TIỆN ÍCH GHÉP LƯỚI
 # ============================================================
 def make_disconnected_cell(number):
-    """Ô báo chưa kết nối, có dòng tiếng Việt canh giữa + badge số.
-
-    PIL render text rất chậm (~5-15ms/cell) -> KHÔNG được gọi mỗi frame trong main
-    loop. Hàm này được gọi MỘT LẦN lúc khởi động (xem build_disconnected_cells)
-    để cache sẵn, main chỉ paste cell có sẵn vào canvas."""
+    """Ô báo chưa kết nối (dòng tiếng Việt canh giữa + badge số). PIL render text
+    rất chậm (~5-15ms) -> cache MỘT LẦN lúc khởi động, main chỉ paste."""
     cell = np.zeros((CELL_HEIGHT, CELL_WIDTH, 3), dtype=np.uint8)
     msg = f"Kiểm tra lại kết nối camera {number}"
     cell = put_text_vn_center(cell, msg, CELL_HEIGHT // 2, 24, (60, 60, 240))
@@ -396,29 +85,6 @@ def build_disconnected_cells():
     return [make_disconnected_cell(i + 1) for i in range(GRID_COLS * GRID_ROWS)]
 
 
-def draw_label(cell, name, dev_index, fps):
-    """Nhãn nhỏ góc trên trái (ASCII, vẽ bằng cv2 cho nhanh)."""
-    label = f"{name} (dev {dev_index}) | {fps:4.1f} FPS"
-    cv2.rectangle(cell, (0, 0), (300, 26), (0, 0, 0), -1)
-    cv2.putText(cell, label, (6, 18),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-    return cell
-
-
-def draw_index_badge(cell, number):
-    """Số thứ tự lớn (1-6) trong vòng tròn ở góc trên phải."""
-    h, w = cell.shape[:2]
-    r = 28
-    cx, cy = w - r - 12, r + 12
-    cv2.circle(cell, (cx, cy), r, (0, 0, 0), -1)
-    cv2.circle(cell, (cx, cy), r, (0, 255, 255), 2)
-    text = str(number)
-    (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 1.2, 3)
-    cv2.putText(cell, text, (cx - tw // 2, cy + th // 2),
-                cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 255), 3)
-    return cell
-
-
 def allocate_canvas():
     """Cấp phát MỘT LẦN canvas tổng cho lưới. Tránh np.hstack/vstack mỗi frame
     (mỗi lần gọi sẽ malloc + memcpy toàn bộ ảnh -> tốn CPU & gây jitter)."""
@@ -427,8 +93,8 @@ def allocate_canvas():
 
 
 def cell_position(i):
-    """Vị trí (row, col) trong lưới của CAM số (i+1). Bố cục theo CỘT, số CHẴN ở
-    HÀNG TRÊN, số LẺ ở HÀNG DƯỚI:
+    """Vị trí (row, col) của CAM số (i+1). Bố cục theo CỘT, số CHẴN hàng TRÊN,
+    số LẺ hàng DƯỚI:
         CAM2  CAM4  CAM6   (row 0 - trên)
         CAM1  CAM3  CAM5   (row 1 - dưới)
     """
@@ -438,16 +104,12 @@ def cell_position(i):
 
 
 def build_grid_into(canvas, cameras, disconnected_cells):
-    """Paste cell mới nhất của từng camera vào canvas.
-
-    Mỗi cam tự render cell trong thread của nó -> main thread chỉ memcpy (numpy
-    slicing) -> rất nhẹ. cam.cell = None (cam chưa cắm / vừa rớt) -> thay bằng ô
-    'Kiểm tra lại kết nối' đã cache sẵn. Vị trí ô theo cell_position()."""
+    """Paste cell mới nhất của từng camera vào canvas (main chỉ memcpy, rất nhẹ).
+    cam.cell = None (chưa cắm / vừa rớt) -> thay bằng ô 'mất kết nối' đã cache."""
     for i in range(GRID_COLS * GRID_ROWS):
         r, c = cell_position(i)
         y1, y2 = r * CELL_HEIGHT, (r + 1) * CELL_HEIGHT
         x1, x2 = c * CELL_WIDTH, (c + 1) * CELL_WIDTH
-
         cell = cameras[i].cell if i < len(cameras) else None
         if cell is None:
             cell = disconnected_cells[i]        # đã cache sẵn, không render lại
@@ -456,32 +118,12 @@ def build_grid_into(canvas, cameras, disconnected_cells):
 
 
 # ============================================================
-# TIỆN ÍCH DÒ CAMERA (chạy thủ công khi setup)
-# ============================================================
-def detect_cameras(max_index=10):
-    print("Đang dò camera...")
-    found = []
-    for i in range(max_index):
-        cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)
-        if cap.isOpened():
-            ret, _ = cap.read()
-            if ret:
-                found.append(i)
-                print(f"  - Tìm thấy camera tại index {i}")
-            cap.release()
-    print(f"Kết quả: {found}")
-    return found
-
-
-# ============================================================
-# CHƯƠNG TRÌNH CHÍNH
+# KHỞI TẠO CAMERA + CHƯƠNG TRÌNH CHÍNH
 # ============================================================
 def build_cameras():
     """Tạo danh sách Camera cho ô 1..N (chỉ số list = CAM (i+1)).
-
-    - Ưu tiên CAMERA_INSTANCE_IDS: mỗi CAM khớp theo instance_id (ổn định theo
-      cổng USB). In bảng đối chiếu instance_id -> index để kiểm tra.
-    - Để trống -> fallback CAMERA_INDICES (index DSHOW thủ công)."""
+    - Ưu tiên CAMERA_INSTANCE_IDS (ổn định theo cổng USB); in bảng đối chiếu.
+    - Để trống / thiếu lib -> fallback CAMERA_INDICES (index DSHOW thủ công)."""
     n_cells = GRID_COLS * GRID_ROWS
     cameras = []
     cams = list_real_cameras() if CAMERA_INSTANCE_IDS else None
@@ -512,14 +154,12 @@ def build_cameras():
 def main():
     print("Đang khởi tạo các camera...")
     cameras = build_cameras()
-    # Mỗi cam tự chạy thread đọc riêng. Giãn cách lúc start để USB negotiate ổn
-    # định (việc mở vẫn được _OPEN_LOCK serialize trong từng thread).
+    # Mỗi cam tự chạy thread đọc riêng. Giãn cách lúc start để USB negotiate ổn định.
     for cam in cameras:
         cam.start()
         time.sleep(0.4)
 
-    # Pre-allocate canvas + cache ô "mất kết nối" (Pillow text rất chậm,
-    # không thể render mỗi frame trong main loop).
+    # Pre-allocate canvas + cache ô "mất kết nối" (Pillow text rất chậm).
     canvas = allocate_canvas()
     disconnected_cells = build_disconnected_cells()
 
@@ -527,16 +167,16 @@ def main():
     fullscreen = False
     print("Bắt đầu hiển thị. Phím: q/ESC thoát | f toàn màn hình | s chụp ảnh")
 
-    # Nhịp ghép lưới + hiển thị (cell do thread cam tự cập nhật). Cap ~30fps để
-    # cửa sổ mượt + waitKey được gọi đều (Windows không báo "Not Responding").
+    # Nhịp ghép lưới + hiển thị. Cap ~30fps để cửa sổ mượt + waitKey gọi đều
+    # (Windows không báo "Not Responding").
     frame_period = 1.0 / 30.0
     next_tick = time.time()
 
     try:
         while True:
             # Watchdog "đứng hình": cam đang MỞ mà không có khung mới quá
-            # FREEZE_TIMEOUT (vd grab() treo do rung USB) -> ép reset để tự hồi.
-            # Cam đã rớt hẳn (cap=None) do đường grab-fail tự lo, bỏ qua ở đây.
+            # FREEZE_TIMEOUT (vd grab() treo do rung USB) -> ép reset. Cam rớt hẳn
+            # (cap=None) do đường grab-fail tự lo, bỏ qua ở đây.
             now = time.time()
             for cam in cameras:
                 if (cam.cap is not None and not cam._reset_requested
@@ -562,14 +202,13 @@ def main():
                 cv2.imwrite(fname, canvas)
                 print(f"[+] Đã lưu {fname}")
 
-            # Giữ nhịp display: ngủ phần thời gian còn dư trong period
+            # Giữ nhịp display: ngủ phần dư trong period.
             next_tick += frame_period
             sleep_for = next_tick - time.time()
             if sleep_for > 0:
                 time.sleep(sleep_for)
             else:
-                # Bị tụt nhịp -> reset mốc, không tích lũy nợ thời gian
-                next_tick = time.time()
+                next_tick = time.time()   # tụt nhịp -> reset, không tích nợ thời gian
     finally:
         print("Đang đóng camera...")
         for cam in cameras:
@@ -579,8 +218,8 @@ def main():
 
 
 def discover():
-    """In bảng index | name | path của các camera THẬT (đã lọc camera ảo) để
-    đối chiếu, lấy instance_id (nằm trong path) điền vào CAMERA_INSTANCE_IDS."""
+    """In bảng index | name | path của camera THẬT (đã lọc cam ảo) để lấy
+    instance_id (nằm trong path) điền vào CAMERA_INSTANCE_IDS."""
     cams = list_real_cameras()
     if cams is None:
         return
@@ -596,12 +235,8 @@ def discover():
 
 
 if __name__ == "__main__":
-    # Liệt kê camera thật + path để lấy instance_id điền vào CAMERA_INSTANCE_IDS:
-    #   python multi_camera_viewer.py discover
     if "discover" in sys.argv:
         discover()
-    # Dò index DSHOW thô (fallback CAMERA_INDICES):
-    #   python multi_camera_viewer.py --detect
     elif "--detect" in sys.argv:
         detect_cameras()
     else:
