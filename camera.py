@@ -119,35 +119,42 @@ class Camera:
 
     def _open(self):
         """Mở camera, trả True nếu được. In codec/độ phân giải THỰC TẾ để soi cam
-        nào rớt về raw (YUYV) gây nghẽn. Dò index theo instance_id + mở chạy trong
-        _OPEN_LOCK để serialize (chống map nhầm index -> trùng luồng)."""
-        with _OPEN_LOCK:
-            # Dò index DSHOW HIỆN TẠI theo instance_id (bền với đảo index/cam ảo).
-            if self.target:
+        nào rớt về raw (YUYV) gây nghẽn.
+
+        NỚI KHÓA: chỉ bước DÒ INDEX theo instance_id (enumerate) chạy trong
+        _OPEN_LOCK để serialize (enumerate song song trả index không nhất quán ->
+        TRÙNG LUỒNG). Còn lệnh VideoCapture MỞ NGOÀI khóa -> nhiều cam mở SONG SONG
+        (nhanh hơn ở chế độ tuần tự nhiều nhóm). Đánh đổi: mở song song trên DShow
+        thi thoảng trượt -> trả False, vòng chụp tự thử lại (không sập app); và nếu
+        cắm/rút ngay trong lúc mở, ô có thể sai 1 nhịp rồi tự đúng lại lượt sau."""
+        # 1) Resolve index theo instance_id DƯỚI khóa (chỉ enumerate, rất nhanh).
+        if self.target:
+            with _OPEN_LOCK:
                 idx = find_index_by_instance(self.target, list_real_cameras() or [])
-                if idx is None:
-                    return False
-                self.src = idx
-            if self.src is None:                 # không resolve được -> coi như chưa cắm
+            if idx is None:
                 return False
-            cap = cv2.VideoCapture(self.src, cv2.CAP_DSHOW)
-            # Ép codec (CAPTURE_FOURCC) TRƯỚC khi set độ phân giải. YUY2=raw (nhẹ
-            # CPU, nặng USB) / MJPG=nén (nặng CPU decode, nhẹ USB). Xem config.
-            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*CAPTURE_FOURCC))
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAPTURE_WIDTH)
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAPTURE_HEIGHT)
-            cap.set(cv2.CAP_PROP_FPS, CAPTURE_FPS)
-            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-            if cap.isOpened():
-                aw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-                ah = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-                fc = int(cap.get(cv2.CAP_PROP_FOURCC))
-                fourcc = "".join(chr((fc >> 8 * k) & 0xFF) for k in range(4))
-                print(f"[open] {self.name} (dev {self.src}): {aw}x{ah} {fourcc}")
-                self.cap = cap
-                return True
-            cap.release()
+            self.src = idx
+        if self.src is None:                 # không resolve được -> coi như chưa cắm
             return False
+        # 2) Mở VideoCapture NGOÀI khóa (cho phép mở song song nhiều cam).
+        cap = cv2.VideoCapture(self.src, cv2.CAP_DSHOW)
+        # Ép codec (CAPTURE_FOURCC) TRƯỚC khi set độ phân giải. YUY2=raw (nhẹ
+        # CPU, nặng USB) / MJPG=nén (nặng CPU decode, nhẹ USB). Xem config.
+        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*CAPTURE_FOURCC))
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAPTURE_WIDTH)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAPTURE_HEIGHT)
+        cap.set(cv2.CAP_PROP_FPS, CAPTURE_FPS)
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        if cap.isOpened():
+            aw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            ah = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            fc = int(cap.get(cv2.CAP_PROP_FOURCC))
+            fourcc = "".join(chr((fc >> 8 * k) & 0xFF) for k in range(4))
+            print(f"[open] {self.name} (dev {self.src}): {aw}x{ah} {fourcc}")
+            self.cap = cap
+            return True
+        cap.release()
+        return False
 
     def _release_cap(self):
         if self.cap is not None:

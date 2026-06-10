@@ -84,10 +84,11 @@ CAPTURE_FOURCC = "MJPG"
 # cam kế (luôn CHỈ 1 cam trong nhóm MỞ cùng lúc -> hợp giới hạn hub). Cam KHÔNG
 # nằm trong nhóm nào -> chạy LIVE bình thường.
 # [] = không có nhóm (tất cả live). [[4,5]] = CAM5+CAM6 1 nhóm. [[0,1,2,3,4,5]] =
-# CẢ 6 cam 1 nhóm tuần tự: chỉ 1 cam MỞ/lúc -> CPU THẤP NHẤT + nhẹ USB nhất, đổi
-# lại refresh ~0.13-0.16 FPS/cam (1 vòng 6 cam ~6-7.5s vì mở cam ~1-1.25s, nối tiếp
-# qua _OPEN_LOCK). Muốn nhanh hơn phải nới khóa cho mở song song (rủi ro hơn).
-SEQUENTIAL_GROUPS = [[0, 1, 2, 3, 4, 5]]
+# cả 6 cam 1 nhóm (1 cam mở/lúc, CPU thấp nhất, refresh ~0.13 FPS).
+# [[0,1],[2,3],[4,5]] = 3 CẶP SONG SONG (mỗi cặp 1 thread, 3 cam mở cùng lúc) ->
+# ~0.4 FPS/cam, CPU cao hơn (~3 cam decode). CAM5/6 vẫn chung 1 cặp -> hub không
+# bị 2 live. Cần _open() đã NỚI KHÓA (mở VideoCapture song song) mới nhanh thật.
+SEQUENTIAL_GROUPS = [[0, 1], [2, 3], [4, 5]]
 
 # (tuần tự) FPS MỤC TIÊU mỗi cam trong nhóm (số ảnh/giây làm mới + hiển thị trên
 # nhãn). 0.5 = mỗi cam làm mới mỗi 2s. Đây là TRẦN: mỗi lượt cam phải mở+chụp+đóng
