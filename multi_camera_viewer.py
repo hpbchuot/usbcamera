@@ -23,7 +23,7 @@ from PIL import Image, ImageDraw, ImageFont
 from config import (CAMERA_INSTANCE_IDS, CAMERA_INDICES, ROTATE_180_CAMS,
                     CELL_WIDTH, CELL_HEIGHT, GRID_COLS, GRID_ROWS,
                     FREEZE_TIMEOUT, WINDOW_NAME,
-                    SEQUENTIAL_GROUPS, SEQ_DWELL)
+                    SEQUENTIAL_GROUPS, SEQ_TARGET_FPS)
 from camera import (Camera, list_real_cameras, find_index_by_instance,
                     draw_index_badge, detect_cameras)
 
@@ -165,17 +165,34 @@ def build_cameras():
 
 
 def _sequential_group_loop(cameras, slots, stop_event):
-    """Luân phiên các cam trong 1 NHÓM TUẦN TỰ: mở 1 cam -> chụp ảnh vào ô -> giữ
-    SEQ_DWELL giây -> ĐÓNG -> cam kế. LUÔN chỉ 1 cam trong nhóm MỞ cùng lúc (hợp
-    giới hạn hub không cho 2 live). Chạy 1 thread nền; ô giữ ảnh gần nhất tới lượt sau."""
+    """Luân phiên các cam trong 1 NHÓM TUẦN TỰ: mở 1 cam -> chụp ảnh vào ô -> ĐÓNG
+    -> cam kế. LUÔN chỉ 1 cam MỞ cùng lúc (hợp giới hạn hub không cho 2 live).
+    Ghìm nhịp để mỗi cam làm mới ~SEQ_TARGET_FPS; cập nhật cam.fps = nhịp THỰC để
+    hiển thị trên nhãn (nếu mở cam quá chậm, fps thực sẽ thấp hơn mục tiêu)."""
     members = [cameras[i] for i in slots if 0 <= i < len(cameras)]
+    n = max(1, len(members))
+    # Mỗi "lượt" 1 cam = (chu kỳ mỗi cam) / số cam. Chu kỳ mỗi cam = 1/SEQ_TARGET_FPS.
+    slot_period = (1.0 / SEQ_TARGET_FPS) / n if SEQ_TARGET_FPS and SEQ_TARGET_FPS > 0 else 0.0
+    last_snap = {}
     while not stop_event.is_set():
         for cam in members:
             if stop_event.is_set():
                 break
-            cam.snapshot()                 # mở (nếu cần) + chụp 1 ảnh tươi vào ô
-            stop_event.wait(SEQ_DWELL)      # giữ ảnh một lúc (vẫn thoát nhanh)
-            cam._release_cap()              # ĐÓNG để nhường cho cam kế trong nhóm
+            t0 = time.time()
+            # fps THỰC = 1 / khoảng cách giữa 2 lần chụp của chính cam này (= 1 vòng
+            # đủ nhóm). Tính TRƯỚC snapshot để nhãn vẽ trong snapshot hiện số mới.
+            prev = last_snap.get(id(cam), 0.0)
+            if prev > 0.0:
+                dt = t0 - prev
+                if dt > 0:
+                    cam.fps = 1.0 / dt
+            last_snap[id(cam)] = t0
+            cam.snapshot()                 # mở + chụp 1 ảnh tươi (vẽ nhãn kèm fps)
+            cam._release_cap()             # ĐÓNG ngay -> nhường cho cam kế trong nhóm
+            # Ghìm phần thời gian còn lại của lượt để đạt nhịp SEQ_TARGET_FPS.
+            pad = slot_period - (time.time() - t0)
+            if pad > 0:
+                stop_event.wait(pad)
     for cam in members:
         cam._release_cap()
 

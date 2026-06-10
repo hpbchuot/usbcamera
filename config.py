@@ -86,8 +86,11 @@ CAPTURE_FOURCC = "MJPG"
 # [] = không có nhóm (tất cả live). VD CAM5+CAM6 chung 1 hub: [[4, 5]].
 SEQUENTIAL_GROUPS = [[4, 5]]
 
-# (tuần tự) Giữ ảnh mỗi cam trong nhóm bao lâu (giây) trước khi đóng & sang cam kế.
-SEQ_DWELL = 0.8
+# (tuần tự) FPS MỤC TIÊU mỗi cam trong nhóm (số ảnh/giây làm mới + hiển thị trên
+# nhãn). 0.5 = mỗi cam làm mới mỗi 2s. Đây là TRẦN: mỗi lượt cam phải mở+chụp+đóng
+# trong (1/FPS)/số_cam giây; nếu mở DShow chậm hơn (open ~0.5-1.5s) thì FPS thực
+# (và số hiển thị) sẽ THẤP hơn mục tiêu. 0 = chạy nhanh nhất có thể.
+SEQ_TARGET_FPS = 0.5
 
 # (tuần tự) Số khung XẢ bỏ sau khi mở để loại ảnh cũ trong buffer trước khi chụp.
 SNAPSHOT_FLUSH = 4
